@@ -1,3 +1,6 @@
+# Claude memory
+.claude/
+
 # Datos de build (archivos grandes, regenerables)
 web/scriptures-index.json
 web/node_modules/
