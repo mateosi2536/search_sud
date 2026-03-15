@@ -1,0 +1,19 @@
+# Datos de build (archivos grandes, regenerables)
+web/scriptures-index.json
+web/node_modules/
+
+# PDFs fuente
+escrituras_pdf/
+
+# Datos fuente originales
+lds-scriptures-2020.12.08/
+
+# Chunks intermedios
+chunks/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/

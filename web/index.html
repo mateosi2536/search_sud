@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cuádruple SUD</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Cuádruple SUD</h1>
+            <p class="subtitle">Búsqueda Semántica</p>
+        </header>
+
+        <div class="search-bar">
+            <input type="text" id="query" placeholder="Escribe una pregunta y presiona Enter..." disabled>
+        </div>
+
+        <div class="controls-bar">
+            <div class="status-group">
+                <div class="status-item">
+                    <div id="status-dot" class="dot"></div>
+                    <span id="status-text">Cargando...</span>
+                </div>
+                <div class="status-item" id="llm-status" style="display:none">
+                    <div id="llm-dot" class="dot dot-gray"></div>
+                    <span id="llm-text">IA: no cargada</span>
+                </div>
+                <span id="stats" class="stats-text"></span>
+            </div>
+            <div class="controls-right" id="llm-controls" style="display:none">
+                <div class="custom-select" id="model-select-wrapper">
+                    <button class="custom-select-btn" id="model-select-btn">
+                        <span id="model-select-label">Qwen 1.5B (~700 MB)</span>
+                        <svg width="10" height="6" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>
+                    </button>
+                    <div class="custom-select-dropdown" id="model-select-dropdown">
+                        <button class="custom-select-opt" data-value="Qwen2.5-0.5B-Instruct-q4f16_1-MLC">Qwen 0.5B <span class="opt-size">~350 MB</span></button>
+                        <button class="custom-select-opt active" data-value="Qwen2.5-1.5B-Instruct-q4f16_1-MLC">Qwen 1.5B <span class="opt-size">~700 MB</span></button>
+                        <button class="custom-select-opt" data-value="Qwen2.5-3B-Instruct-q4f16_1-MLC">Qwen 3B <span class="opt-size">~1.5 GB</span></button>
+                    </div>
+                </div>
+                <button id="llm-toggle" class="llm-btn">Cargar IA</button>
+            </div>
+        </div>
+
+        <div class="main-grid" id="main-grid">
+            <div class="results-col">
+                <div id="user-results-section" style="display:none">
+                    <div class="section-label">Tu búsqueda</div>
+                    <div id="user-results"></div>
+                </div>
+                <div id="ai-results-section" style="display:none">
+                    <div class="section-label label-ai">Búsqueda de la IA</div>
+                    <div id="ai-query-preview" class="ai-query-preview"></div>
+                    <div id="ai-results"></div>
+                </div>
+            </div>
+            <div class="answer-col" id="answer-col" style="display:none">
+                <div class="section-label label-ai">Respuesta IA</div>
+                <div id="answer-text" class="answer-text"></div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
+        import * as webllm from 'https://esm.run/@mlc-ai/web-llm';
+
+        const DIMS  = 768;
+        const TOP_K = 8;
+        const RAG_K = 3; // chunks por búsqueda pasados al LLM
+
+        let vectors  = null;
+        let metadata = null;
+        let embedder = null;
+        let llmEngine        = null;
+        let llmEnginePromise = null;
+
+        const queryInput       = document.getElementById('query');
+        const statusText       = document.getElementById('status-text');
+        const statusDot        = document.getElementById('status-dot');
+        const statsDiv         = document.getElementById('stats');
+        const llmStatusDiv     = document.getElementById('llm-status');
+        const llmDot           = document.getElementById('llm-dot');
+        const llmText          = document.getElementById('llm-text');
+        const llmControls      = document.getElementById('llm-controls');
+        const llmToggle        = document.getElementById('llm-toggle');
+        const modelSelectBtn   = document.getElementById('model-select-btn');
+        const modelSelectLabel = document.getElementById('model-select-label');
+        const modelDropdown    = document.getElementById('model-select-dropdown');
+        const modelSelectWrapper = document.getElementById('model-select-wrapper');
+
+        // Custom select logic
+        let selectedModelId = 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC';
+        let modelSelectDisabled = false;
+
+        modelSelectBtn.addEventListener('click', () => {
+            if (modelSelectDisabled) return;
+            modelSelectWrapper.classList.toggle('open');
+        });
+
+        document.addEventListener('click', e => {
+            if (!modelSelectWrapper.contains(e.target)) modelSelectWrapper.classList.remove('open');
+        });
+
+        modelDropdown.querySelectorAll('.custom-select-opt').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (modelSelectDisabled) return;
+                const newId = btn.dataset.value;
+                if (newId === selectedModelId) { modelSelectWrapper.classList.remove('open'); return; }
+
+                selectedModelId = newId;
+                modelSelectLabel.textContent = btn.textContent.trim();
+                modelDropdown.querySelectorAll('.custom-select-opt').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                modelSelectWrapper.classList.remove('open');
+
+                // Si ya había un modelo cargado, resetear para permitir cargar el nuevo
+                if (llmEngine || llmEnginePromise) {
+                    llmEngine        = null;
+                    llmEnginePromise = null;
+                    llmDot.className  = 'dot dot-gray';
+                    llmText.innerText = 'IA: no cargada';
+                    llmToggle.innerText  = 'Cargar IA';
+                    llmToggle.disabled   = false;
+                }
+            });
+        });
+        const userResultsDiv   = document.getElementById('user-results');
+        const userSection      = document.getElementById('user-results-section');
+        const aiResultsDiv     = document.getElementById('ai-results');
+        const aiSection        = document.getElementById('ai-results-section');
+        const aiQueryPreview   = document.getElementById('ai-query-preview');
+        const answerCol        = document.getElementById('answer-col');
+        const answerText       = document.getElementById('answer-text');
+
+        // ── Init embeddings ──────────────────────────────────────────────────
+        async function init() {
+            try {
+                statusText.innerText = 'Cargando modelo y datos...';
+                const [pipe, vecRes, metaRes] = await Promise.all([
+                    pipeline('feature-extraction', 'Xenova/paraphrase-multilingual-mpnet-base-v2'),
+                    fetch('vectors.bin'),
+                    fetch('metadata.json'),
+                ]);
+                embedder = pipe;
+                statusText.innerText = 'Procesando...';
+                const [vecBuf, metaData] = await Promise.all([vecRes.arrayBuffer(), metaRes.json()]);
+                vectors  = new Float32Array(vecBuf);
+                metadata = metaData;
+                statusText.innerText = `${metadata.length.toLocaleString('es')} escrituras`;
+                statusDot.classList.add('ready');
+                queryInput.disabled = false;
+                queryInput.focus();
+                llmStatusDiv.style.display = 'flex';
+                llmControls.style.display  = 'flex';
+            } catch (err) {
+                console.error(err);
+                statusText.innerText = 'Error al cargar.';
+                statusDot.style.background = '#ef4444';
+            }
+        }
+
+        // ── Cargar LLM ───────────────────────────────────────────────────────
+        function loadLLM() {
+            if (llmEnginePromise) return llmEnginePromise;
+            const modelId = selectedModelId;
+            llmToggle.disabled   = true;
+            modelSelectDisabled  = true; // bloquear solo durante descarga
+            modelSelectBtn.style.opacity = '0.5';
+            llmDot.className     = 'dot dot-amber';
+            llmText.innerText    = 'IA: descargando...';
+
+            llmEnginePromise = webllm.CreateMLCEngine(modelId, {
+                initProgressCallback: p => { llmText.innerText = `IA: ${p.text}`; },
+            }).then(engine => {
+                llmEngine = engine;
+                llmDot.className     = 'dot ready';
+                llmText.innerText    = `IA lista`;
+                llmToggle.innerText  = 'IA activa';
+                modelSelectDisabled  = false; // permitir cambiar modelo al terminar
+                modelSelectBtn.style.opacity = '';
+                return engine;
+            }).catch(err => {
+                console.error(err);
+                llmText.innerText    = 'IA: error';
+                llmDot.style.background = '#ef4444';
+                llmToggle.disabled   = false;
+                modelSelectDisabled  = false;
+                modelSelectBtn.style.opacity  = '';
+                llmToggle.innerText  = 'Reintentar';
+                llmEnginePromise     = null;
+                throw err;
+            });
+            return llmEnginePromise;
+        }
+
+        llmToggle.addEventListener('click', loadLLM);
+
+        // ── KNN ──────────────────────────────────────────────────────────────
+        function knn(queryVec, k = TOP_K) {
+            const n = vectors.length / DIMS;
+            const scores = new Float32Array(n);
+            for (let i = 0; i < n; i++) {
+                let dot = 0, off = i * DIMS;
+                for (let j = 0; j < DIMS; j++) dot += queryVec[j] * vectors[off + j];
+                scores[i] = dot;
+            }
+            const indices = Array.from({ length: n }, (_, i) => i);
+            indices.sort((a, b) => scores[b] - scores[a]);
+            return indices.slice(0, k).map(i => ({ score: scores[i], ...metadata[i] }));
+        }
+
+        async function embed(text) {
+            const out = await embedder(text, { pooling: 'mean', normalize: true });
+            return new Float32Array(out.data);
+        }
+
+        // ── Búsqueda principal ───────────────────────────────────────────────
+        async function search(query) {
+            if (!vectors || !embedder || !query.trim()) return;
+
+            // Reset UI
+            userSection.style.display  = 'none';
+            aiSection.style.display    = 'none';
+            answerCol.style.display    = 'none';
+            userResultsDiv.innerHTML   = skeletons(3);
+            userSection.style.display  = 'block';
+            statsDiv.innerText         = '';
+
+            const t0 = performance.now();
+            const userVec     = await embed(query);
+            const userResults = knn(userVec);
+            const elapsed     = (performance.now() - t0).toFixed(0);
+
+            statsDiv.innerText = `${elapsed} ms`;
+            renderResults(userResultsDiv, userResults);
+
+            if (llmEngine) {
+                runRAG(query);
+            }
+        }
+
+        // ── RAG de dos pasos ─────────────────────────────────────────────────
+        async function runRAG(query) {
+            // Paso 1: LLM genera una consulta de búsqueda refinada
+            aiQueryPreview.innerText = '...';
+            aiResultsDiv.innerHTML   = skeletons(2);
+            aiSection.style.display  = 'block';
+            answerCol.style.display  = 'block';
+            answerText.innerText     = '';
+            answerText.classList.add('generating');
+
+            let refinedQuery = query;
+            try {
+                const qStream = await llmEngine.chat.completions.create({
+                    messages: [
+                        {
+                            role: 'system',
+                            content: 'Tu tarea es describir en una frase corta (máximo 12 palabras) el contenido o enseñanza que tendría un versículo de las escrituras útil para responder la pregunta del usuario. La frase debe sonar como una descripción de texto escritural, no como una búsqueda de internet. Responde SOLO con la frase, sin explicaciones.',
+                        },
+                        { role: 'user', content: query },
+                    ],
+                    stream: true,
+                    max_tokens: 40,
+                    temperature: 0.2,
+                });
+                let q = '';
+                for await (const chunk of qStream) q += chunk.choices[0]?.delta?.content || '';
+                refinedQuery = q.trim().replace(/^["']|["']$/g, '');
+            } catch (err) {
+                console.error('Error en expansión de consulta:', err);
+            }
+
+            aiQueryPreview.innerText = `"${refinedQuery}"`;
+
+            // Paso 2: búsqueda semántica con la consulta refinada
+            const aiVec     = await embed(refinedQuery);
+            const aiResults = knn(aiVec);
+            renderResults(aiResultsDiv, aiResults);
+
+            // Paso 3: LLM responde usando los resultados de la búsqueda refinada
+            const context = aiResults.slice(0, RAG_K).map(r => {
+                const ref = `${r.book} ${r.chapter}:${r.verses[0]}-${r.verses[r.verses.length - 1]}`;
+                return `[${ref}]\n${r.text}`;
+            }).join('\n\n');
+
+            try {
+                const aStream = await llmEngine.chat.completions.create({
+                    messages: [
+                        {
+                            role: 'system',
+                            content: 'Eres un asistente experto en las escrituras de La Iglesia de Jesucristo de los Santos de los Últimos Días. Responde en español, de forma clara y concisa, citando las referencias de las escrituras.',
+                        },
+                        {
+                            role: 'user',
+                            content: `Contexto de las escrituras:\n\n${context}\n\nPregunta: ${query}\n\nResponde en español citando las referencias.`,
+                        },
+                    ],
+                    stream: true,
+                    max_tokens: 400,
+                    temperature: 0.3,
+                });
+                let answer = '';
+                answerText.innerText = '';
+                for await (const chunk of aStream) {
+                    answer += chunk.choices[0]?.delta?.content || '';
+                    answerText.innerText = answer;
+                }
+            } catch (err) {
+                console.error(err);
+                answerText.innerText = 'Error al generar la respuesta.';
+            } finally {
+                answerText.classList.remove('generating');
+            }
+        }
+
+        // ── Render ───────────────────────────────────────────────────────────
+        function renderResults(container, results) {
+            container.innerHTML = '';
+            for (const r of results) {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+                card.innerHTML = `
+                    <div class="result-header">
+                        <span class="result-loc">${r.book} ${r.chapter}:${r.verses.join(',')}</span>
+                        <span class="result-vol">${r.volume}</span>
+                    </div>
+                    <div class="result-text">${r.text}</div>
+                `;
+                container.appendChild(card);
+            }
+        }
+
+        function skeletons(n) {
+            return Array(n).fill('<div class="skeleton"></div>').join('');
+        }
+
+        // ── Listener ─────────────────────────────────────────────────────────
+        queryInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') search(queryInput.value);
+        });
+
+        init();
+    </script>
+</body>
+</html>
