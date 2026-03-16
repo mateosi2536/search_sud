@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cuádruple SUD</title>
+    <title>Buscador SUD</title>
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -12,7 +12,7 @@
 <body>
     <div class="container">
         <header>
-            <h1>Cuádruple SUD</h1>
+            <h1>Buscador SUD</h1>
             <p class="subtitle">Búsqueda Semántica</p>
         </header>
 
@@ -22,6 +22,10 @@
 
         <div class="controls-bar">
             <div class="status-group">
+                <div class="source-toggle">
+                    <button class="source-btn active" data-source="scriptures">Escrituras</button>
+                    <button class="source-btn" data-source="manual">Manual General</button>
+                </div>
                 <div class="status-item">
                     <div id="status-dot" class="dot"></div>
                     <span id="status-text">Cargando...</span>
@@ -73,29 +77,68 @@
 
         const DIMS  = 768;
         const TOP_K = 8;
-        const RAG_K = 3; // chunks por búsqueda pasados al LLM
+        const RAG_K = 3;
 
-        let vectors  = null;
-        let metadata = null;
+        // Estado por fuente
+        const sources = {
+            scriptures: { vectors: null, metadata: null, loaded: false, loading: false },
+            manual:     { vectors: null, metadata: null, loaded: false, loading: false },
+        };
+        let currentSource = 'scriptures';
+
         let embedder = null;
         let llmEngine        = null;
         let llmEnginePromise = null;
 
-        const queryInput       = document.getElementById('query');
-        const statusText       = document.getElementById('status-text');
-        const statusDot        = document.getElementById('status-dot');
-        const statsDiv         = document.getElementById('stats');
-        const llmStatusDiv     = document.getElementById('llm-status');
-        const llmDot           = document.getElementById('llm-dot');
-        const llmText          = document.getElementById('llm-text');
-        const llmControls      = document.getElementById('llm-controls');
-        const llmToggle        = document.getElementById('llm-toggle');
-        const modelSelectBtn   = document.getElementById('model-select-btn');
-        const modelSelectLabel = document.getElementById('model-select-label');
-        const modelDropdown    = document.getElementById('model-select-dropdown');
+        const queryInput         = document.getElementById('query');
+        const statusText         = document.getElementById('status-text');
+        const statusDot          = document.getElementById('status-dot');
+        const statsDiv           = document.getElementById('stats');
+        const llmStatusDiv       = document.getElementById('llm-status');
+        const llmDot             = document.getElementById('llm-dot');
+        const llmText            = document.getElementById('llm-text');
+        const llmControls        = document.getElementById('llm-controls');
+        const llmToggle          = document.getElementById('llm-toggle');
+        const modelSelectBtn     = document.getElementById('model-select-btn');
+        const modelSelectLabel   = document.getElementById('model-select-label');
+        const modelDropdown      = document.getElementById('model-select-dropdown');
         const modelSelectWrapper = document.getElementById('model-select-wrapper');
+        const userResultsDiv     = document.getElementById('user-results');
+        const userSection        = document.getElementById('user-results-section');
+        const aiResultsDiv       = document.getElementById('ai-results');
+        const aiSection          = document.getElementById('ai-results-section');
+        const aiQueryPreview     = document.getElementById('ai-query-preview');
+        const answerCol          = document.getElementById('answer-col');
+        const answerText         = document.getElementById('answer-text');
 
-        // Custom select logic
+        // ── Source toggle ─────────────────────────────────────────────────────
+        document.querySelectorAll('.source-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const src = btn.dataset.source;
+                if (src === currentSource) return;
+                currentSource = src;
+                document.querySelectorAll('.source-btn').forEach(b => b.classList.toggle('active', b.dataset.source === src));
+
+                // Limpiar resultados
+                userSection.style.display = 'none';
+                aiSection.style.display   = 'none';
+                answerCol.style.display   = 'none';
+                statsDiv.innerText        = '';
+
+                if (!sources[src].loaded && !sources[src].loading) {
+                    await loadSource(src);
+                } else if (sources[src].loaded) {
+                    const count = sources[src].metadata.length;
+                    statusText.innerText = src === 'scriptures'
+                        ? `${count.toLocaleString('es')} escrituras`
+                        : `${count.toLocaleString('es')} fragmentos del Manual`;
+                    statusDot.classList.add('ready');
+                    queryInput.disabled = false;
+                }
+            });
+        });
+
+        // ── Custom model select ───────────────────────────────────────────────
         let selectedModelId = 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC';
         let modelSelectDisabled = false;
 
@@ -103,62 +146,72 @@
             if (modelSelectDisabled) return;
             modelSelectWrapper.classList.toggle('open');
         });
-
         document.addEventListener('click', e => {
             if (!modelSelectWrapper.contains(e.target)) modelSelectWrapper.classList.remove('open');
         });
-
         modelDropdown.querySelectorAll('.custom-select-opt').forEach(btn => {
             btn.addEventListener('click', () => {
                 if (modelSelectDisabled) return;
                 const newId = btn.dataset.value;
                 if (newId === selectedModelId) { modelSelectWrapper.classList.remove('open'); return; }
-
                 selectedModelId = newId;
                 modelSelectLabel.textContent = btn.textContent.trim();
                 modelDropdown.querySelectorAll('.custom-select-opt').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 modelSelectWrapper.classList.remove('open');
-
-                // Si ya había un modelo cargado, resetear para permitir cargar el nuevo
                 if (llmEngine || llmEnginePromise) {
-                    llmEngine        = null;
-                    llmEnginePromise = null;
-                    llmDot.className  = 'dot dot-gray';
+                    llmEngine = null; llmEnginePromise = null;
+                    llmDot.className = 'dot dot-gray';
                     llmText.innerText = 'IA: no cargada';
-                    llmToggle.innerText  = 'Cargar IA';
-                    llmToggle.disabled   = false;
+                    llmToggle.innerText = 'Cargar IA';
+                    llmToggle.disabled = false;
                 }
             });
         });
-        const userResultsDiv   = document.getElementById('user-results');
-        const userSection      = document.getElementById('user-results-section');
-        const aiResultsDiv     = document.getElementById('ai-results');
-        const aiSection        = document.getElementById('ai-results-section');
-        const aiQueryPreview   = document.getElementById('ai-query-preview');
-        const answerCol        = document.getElementById('answer-col');
-        const answerText       = document.getElementById('answer-text');
 
-        // ── Init embeddings ──────────────────────────────────────────────────
+        // ── Cargar fuente ─────────────────────────────────────────────────────
+        async function loadSource(src) {
+            sources[src].loading = true;
+            statusDot.classList.remove('ready');
+            queryInput.disabled = true;
+            statusText.innerText = src === 'scriptures' ? 'Cargando escrituras...' : 'Cargando Manual General...';
+
+            const vecFile  = src === 'scriptures' ? 'vectors.bin'        : 'manual_vectors.bin';
+            const metaFile = src === 'scriptures' ? 'metadata.json'      : 'manual_metadata.json';
+
+            try {
+                const [vecRes, metaRes] = await Promise.all([fetch(vecFile), fetch(metaFile)]);
+                const [vecBuf, metaData] = await Promise.all([vecRes.arrayBuffer(), metaRes.json()]);
+                sources[src].vectors  = new Float32Array(vecBuf);
+                sources[src].metadata = metaData;
+                sources[src].loaded   = true;
+                sources[src].loading  = false;
+
+                // Solo actualizar UI si seguimos en esta fuente
+                if (currentSource === src) {
+                    const count = metaData.length;
+                    statusText.innerText = src === 'scriptures'
+                        ? `${count.toLocaleString('es')} escrituras`
+                        : `${count.toLocaleString('es')} fragmentos del Manual`;
+                    statusDot.classList.add('ready');
+                    queryInput.disabled = false;
+                    queryInput.focus();
+                    llmStatusDiv.style.display = 'flex';
+                    llmControls.style.display  = 'flex';
+                }
+            } catch (err) {
+                console.error(err);
+                statusText.innerText = 'Error al cargar.';
+                statusDot.style.background = '#ef4444';
+                sources[src].loading = false;
+            }
+        }
+
         async function init() {
             try {
-                statusText.innerText = 'Cargando modelo y datos...';
-                const [pipe, vecRes, metaRes] = await Promise.all([
-                    pipeline('feature-extraction', 'Xenova/paraphrase-multilingual-mpnet-base-v2'),
-                    fetch('vectors.bin'),
-                    fetch('metadata.json'),
-                ]);
-                embedder = pipe;
-                statusText.innerText = 'Procesando...';
-                const [vecBuf, metaData] = await Promise.all([vecRes.arrayBuffer(), metaRes.json()]);
-                vectors  = new Float32Array(vecBuf);
-                metadata = metaData;
-                statusText.innerText = `${metadata.length.toLocaleString('es')} escrituras`;
-                statusDot.classList.add('ready');
-                queryInput.disabled = false;
-                queryInput.focus();
-                llmStatusDiv.style.display = 'flex';
-                llmControls.style.display  = 'flex';
+                statusText.innerText = 'Cargando modelo...';
+                embedder = await pipeline('feature-extraction', 'Xenova/paraphrase-multilingual-mpnet-base-v2');
+                await loadSource('scriptures');
             } catch (err) {
                 console.error(err);
                 statusText.innerText = 'Error al cargar.';
@@ -166,44 +219,43 @@
             }
         }
 
-        // ── Cargar LLM ───────────────────────────────────────────────────────
+        // ── Cargar LLM ────────────────────────────────────────────────────────
         function loadLLM() {
             if (llmEnginePromise) return llmEnginePromise;
-            const modelId = selectedModelId;
-            llmToggle.disabled   = true;
-            modelSelectDisabled  = true; // bloquear solo durante descarga
+            llmToggle.disabled  = true;
+            modelSelectDisabled = true;
             modelSelectBtn.style.opacity = '0.5';
-            llmDot.className     = 'dot dot-amber';
-            llmText.innerText    = 'IA: descargando...';
+            llmDot.className    = 'dot dot-amber';
+            llmText.innerText   = 'IA: descargando...';
 
-            llmEnginePromise = webllm.CreateMLCEngine(modelId, {
+            llmEnginePromise = webllm.CreateMLCEngine(selectedModelId, {
                 initProgressCallback: p => { llmText.innerText = `IA: ${p.text}`; },
             }).then(engine => {
                 llmEngine = engine;
-                llmDot.className     = 'dot ready';
-                llmText.innerText    = `IA lista`;
-                llmToggle.innerText  = 'IA activa';
-                modelSelectDisabled  = false; // permitir cambiar modelo al terminar
+                llmDot.className    = 'dot ready';
+                llmText.innerText   = 'IA lista';
+                llmToggle.innerText = 'IA activa';
+                modelSelectDisabled = false;
                 modelSelectBtn.style.opacity = '';
                 return engine;
             }).catch(err => {
                 console.error(err);
-                llmText.innerText    = 'IA: error';
+                llmText.innerText   = 'IA: error';
                 llmDot.style.background = '#ef4444';
-                llmToggle.disabled   = false;
-                modelSelectDisabled  = false;
-                modelSelectBtn.style.opacity  = '';
-                llmToggle.innerText  = 'Reintentar';
-                llmEnginePromise     = null;
+                llmToggle.disabled  = false;
+                modelSelectDisabled = false;
+                modelSelectBtn.style.opacity = '';
+                llmToggle.innerText = 'Reintentar';
+                llmEnginePromise    = null;
                 throw err;
             });
             return llmEnginePromise;
         }
-
         llmToggle.addEventListener('click', loadLLM);
 
-        // ── KNN ──────────────────────────────────────────────────────────────
+        // ── KNN ───────────────────────────────────────────────────────────────
         function knn(queryVec, k = TOP_K) {
+            const { vectors, metadata } = sources[currentSource];
             const n = vectors.length / DIMS;
             const scores = new Float32Array(n);
             for (let i = 0; i < n; i++) {
@@ -221,17 +273,17 @@
             return new Float32Array(out.data);
         }
 
-        // ── Búsqueda principal ───────────────────────────────────────────────
+        // ── Búsqueda principal ────────────────────────────────────────────────
         async function search(query) {
-            if (!vectors || !embedder || !query.trim()) return;
+            const src = sources[currentSource];
+            if (!src.loaded || !embedder || !query.trim()) return;
 
-            // Reset UI
-            userSection.style.display  = 'none';
-            aiSection.style.display    = 'none';
-            answerCol.style.display    = 'none';
-            userResultsDiv.innerHTML   = skeletons(3);
-            userSection.style.display  = 'block';
-            statsDiv.innerText         = '';
+            userSection.style.display = 'none';
+            aiSection.style.display   = 'none';
+            answerCol.style.display   = 'none';
+            userResultsDiv.innerHTML  = skeletons(3);
+            userSection.style.display = 'block';
+            statsDiv.innerText        = '';
 
             const t0 = performance.now();
             const userVec     = await embed(query);
@@ -241,14 +293,13 @@
             statsDiv.innerText = `${elapsed} ms`;
             renderResults(userResultsDiv, userResults);
 
-            if (llmEngine) {
-                runRAG(query);
-            }
+            if (llmEngine) runRAG(query);
         }
 
-        // ── RAG de dos pasos ─────────────────────────────────────────────────
+        // ── RAG ───────────────────────────────────────────────────────────────
         async function runRAG(query) {
-            // Paso 1: LLM genera una consulta de búsqueda refinada
+            const isManual = currentSource === 'manual';
+
             aiQueryPreview.innerText = '...';
             aiResultsDiv.innerHTML   = skeletons(2);
             aiSection.style.display  = 'block';
@@ -256,55 +307,57 @@
             answerText.innerText     = '';
             answerText.classList.add('generating');
 
+            const systemExpand = isManual
+                ? 'Tu tarea es describir en una frase corta (máximo 12 palabras) el contenido que tendría una sección del Manual General de la Iglesia de Jesucristo de los SUD útil para responder la pregunta del usuario. Responde SOLO con la frase.'
+                : 'Tu tarea es describir en una frase corta (máximo 12 palabras) el contenido o enseñanza que tendría un versículo de las escrituras útil para responder la pregunta del usuario. La frase debe sonar como una descripción de texto escritural. Responde SOLO con la frase.';
+
             let refinedQuery = query;
             try {
                 const qStream = await llmEngine.chat.completions.create({
                     messages: [
-                        {
-                            role: 'system',
-                            content: 'Tu tarea es describir en una frase corta (máximo 12 palabras) el contenido o enseñanza que tendría un versículo de las escrituras útil para responder la pregunta del usuario. La frase debe sonar como una descripción de texto escritural, no como una búsqueda de internet. Responde SOLO con la frase, sin explicaciones.',
-                        },
-                        { role: 'user', content: query },
+                        { role: 'system', content: systemExpand },
+                        { role: 'user',   content: query },
                     ],
-                    stream: true,
-                    max_tokens: 40,
-                    temperature: 0.2,
+                    stream: true, max_tokens: 40, temperature: 0.2,
                 });
                 let q = '';
                 for await (const chunk of qStream) q += chunk.choices[0]?.delta?.content || '';
                 refinedQuery = q.trim().replace(/^["']|["']$/g, '');
-            } catch (err) {
-                console.error('Error en expansión de consulta:', err);
-            }
+            } catch (err) { console.error('Error en expansión:', err); }
 
             aiQueryPreview.innerText = `"${refinedQuery}"`;
 
-            // Paso 2: búsqueda semántica con la consulta refinada
             const aiVec     = await embed(refinedQuery);
             const aiResults = knn(aiVec);
             renderResults(aiResultsDiv, aiResults);
 
-            // Paso 3: LLM responde usando los resultados de la búsqueda refinada
             const context = aiResults.slice(0, RAG_K).map(r => {
-                const ref = `${r.book} ${r.chapter}:${r.verses[0]}-${r.verses[r.verses.length - 1]}`;
-                return `[${ref}]\n${r.text}`;
+                if (isManual) {
+                    const ref = r.section_number
+                        ? `${r.section_number} ${r.section_title}`
+                        : r.chapter_title;
+                    return `[${ref}]\n${r.text}`;
+                } else {
+                    const ref = `${r.book} ${r.chapter}:${r.verses[0]}-${r.verses[r.verses.length - 1]}`;
+                    return `[${ref}]\n${r.text}`;
+                }
             }).join('\n\n');
+
+            const systemAnswer = isManual
+                ? 'Eres un asistente experto en el Manual General de La Iglesia de Jesucristo de los Santos de los Últimos Días. Responde en español, de forma clara y concisa, citando las secciones del manual.'
+                : 'Eres un asistente experto en las escrituras de La Iglesia de Jesucristo de los Santos de los Últimos Días. Responde en español, de forma clara y concisa, citando las referencias de las escrituras.';
+
+            const userPrompt = isManual
+                ? `Contexto del Manual General:\n\n${context}\n\nPregunta: ${query}\n\nResponde en español citando las secciones del manual.`
+                : `Contexto de las escrituras:\n\n${context}\n\nPregunta: ${query}\n\nResponde en español citando las referencias.`;
 
             try {
                 const aStream = await llmEngine.chat.completions.create({
                     messages: [
-                        {
-                            role: 'system',
-                            content: 'Eres un asistente experto en las escrituras de La Iglesia de Jesucristo de los Santos de los Últimos Días. Responde en español, de forma clara y concisa, citando las referencias de las escrituras.',
-                        },
-                        {
-                            role: 'user',
-                            content: `Contexto de las escrituras:\n\n${context}\n\nPregunta: ${query}\n\nResponde en español citando las referencias.`,
-                        },
+                        { role: 'system', content: systemAnswer },
+                        { role: 'user',   content: userPrompt },
                     ],
-                    stream: true,
-                    max_tokens: 400,
-                    temperature: 0.3,
+                    stream: true, max_tokens: 400, temperature: 0.3,
                 });
                 let answer = '';
                 answerText.innerText = '';
@@ -320,18 +373,31 @@
             }
         }
 
-        // ── Render ───────────────────────────────────────────────────────────
+        // ── Render ────────────────────────────────────────────────────────────
         function renderResults(container, results) {
             container.innerHTML = '';
             for (const r of results) {
                 const card = document.createElement('div');
                 card.className = 'result-card';
+
+                let loc, badge, text;
+                if (currentSource === 'manual') {
+                    loc   = r.section_number ? `${r.section_number} ${r.section_title}` : r.chapter_title;
+                    badge = r.chapter_title;
+                    // Quitar el prefijo [Capítulo] [Sección] del texto para display
+                    text  = r.text.replace(/^\[[^\]]+\]\s*(\[[^\]]+\]\s*)?/, '');
+                } else {
+                    loc   = `${r.book} ${r.chapter}:${r.verses.join(',')}`;
+                    badge = r.volume;
+                    text  = r.text;
+                }
+
                 card.innerHTML = `
                     <div class="result-header">
-                        <span class="result-loc">${r.book} ${r.chapter}:${r.verses.join(',')}</span>
-                        <span class="result-vol">${r.volume}</span>
+                        <span class="result-loc">${loc}</span>
+                        <span class="result-vol">${badge}</span>
                     </div>
-                    <div class="result-text">${r.text}</div>
+                    <div class="result-text">${text}</div>
                 `;
                 container.appendChild(card);
             }
@@ -341,7 +407,7 @@
             return Array(n).fill('<div class="skeleton"></div>').join('');
         }
 
-        // ── Listener ─────────────────────────────────────────────────────────
+        // ── Listener ──────────────────────────────────────────────────────────
         queryInput.addEventListener('keydown', e => {
             if (e.key === 'Enter') search(queryInput.value);
         });

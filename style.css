@@ -72,6 +72,34 @@ h1 {
     padding: 0.2rem 0;
 }
 
+/* Source toggle */
+.source-toggle {
+    display: flex;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 0.15rem;
+    gap: 0.15rem;
+}
+
+.source-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    border-radius: 0.35rem;
+    padding: 0.2rem 0.65rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+}
+.source-btn:hover { color: var(--text-primary); }
+.source-btn.active {
+    background: var(--primary);
+    color: #fff;
+}
+
 /* Controls bar */
 .controls-bar {
     display: flex;
