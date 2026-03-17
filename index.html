@@ -39,15 +39,20 @@
             <div class="controls-right" id="llm-controls" style="display:none">
                 <div class="custom-select" id="model-select-wrapper">
                     <button class="custom-select-btn" id="model-select-btn">
-                        <span id="model-select-label">Qwen 1.5B (~700 MB)</span>
+                        <span id="model-select-label">Llama 3.2 1B (~600 MB)</span>
                         <svg width="10" height="6" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>
                     </button>
                     <div class="custom-select-dropdown" id="model-select-dropdown">
-                        <button class="custom-select-opt" data-value="Qwen2.5-0.5B-Instruct-q4f16_1-MLC">Qwen 0.5B <span class="opt-size">~350 MB</span></button>
-                        <button class="custom-select-opt active" data-value="Qwen2.5-1.5B-Instruct-q4f16_1-MLC">Qwen 1.5B <span class="opt-size">~700 MB</span></button>
-                        <button class="custom-select-opt" data-value="Qwen2.5-3B-Instruct-q4f16_1-MLC">Qwen 3B <span class="opt-size">~1.5 GB</span></button>
+                        <button class="custom-select-opt active" data-value="Llama-3.2-1B-Instruct-q4f16_1-MLC">Llama 3.2 1B <span class="opt-size">~600 MB</span></button>
+                        <button class="custom-select-opt" data-value="Qwen3-0.6B-q4f16_1-MLC">Qwen3 0.6B <span class="opt-size">~300 MB</span></button>
+                        <button class="custom-select-opt" data-value="Qwen3-1.7B-q4f16_1-MLC">Qwen3 1.7B <span class="opt-size">~900 MB</span></button>
                     </div>
                 </div>
+                <label id="thinking-toggle-wrap" class="thinking-toggle-label" style="display:none" title="Habilitar razonamiento interno (solo Qwen3)">
+                    <input type="checkbox" id="thinking-toggle" checked>
+                    <span class="thinking-toggle-track"><span class="thinking-toggle-thumb"></span></span>
+                    <span class="thinking-toggle-text">Razonar</span>
+                </label>
                 <button id="llm-toggle" class="llm-btn">Cargar IA</button>
             </div>
         </div>
@@ -59,13 +64,22 @@
                     <div id="user-results"></div>
                 </div>
                 <div id="ai-results-section" style="display:none">
-                    <div class="section-label label-ai">Búsqueda de la IA</div>
-                    <div id="ai-query-preview" class="ai-query-preview"></div>
+                    <div class="section-label label-ai">Escrituras encontradas</div>
                     <div id="ai-results"></div>
                 </div>
             </div>
             <div class="answer-col" id="answer-col" style="display:none">
-                <div class="section-label label-ai">Respuesta IA</div>
+                <div class="section-label label-ai">Búsqueda de la IA</div>
+                <details id="thinking-expand-details" style="display:none">
+                    <summary class="thinking-summary">Ver razonamiento</summary>
+                    <div id="thinking-expand-text" class="thinking-text"></div>
+                </details>
+                <div id="ai-query-preview" class="ai-query-preview"></div>
+                <div class="section-label label-ai" style="margin-top:0.6rem">Respuesta IA</div>
+                <details id="thinking-details" style="display:none">
+                    <summary class="thinking-summary">Ver razonamiento</summary>
+                    <div id="thinking-text" class="thinking-text"></div>
+                </details>
                 <div id="answer-text" class="answer-text"></div>
             </div>
         </div>
@@ -108,8 +122,19 @@
         const aiResultsDiv       = document.getElementById('ai-results');
         const aiSection          = document.getElementById('ai-results-section');
         const aiQueryPreview     = document.getElementById('ai-query-preview');
-        const answerCol          = document.getElementById('answer-col');
-        const answerText         = document.getElementById('answer-text');
+        const answerCol              = document.getElementById('answer-col');
+        const answerText             = document.getElementById('answer-text');
+        const thinkingDetails        = document.getElementById('thinking-details');
+        const thinkingText           = document.getElementById('thinking-text');
+        const thinkingExpandDetails  = document.getElementById('thinking-expand-details');
+        const thinkingExpandText     = document.getElementById('thinking-expand-text');
+        const thinkingToggleWrap     = document.getElementById('thinking-toggle-wrap');
+        const thinkingToggle         = document.getElementById('thinking-toggle');
+
+        function isQwen3Model(id) { return id.startsWith('Qwen3'); }
+        function updateThinkingToggleVisibility() {
+            thinkingToggleWrap.style.display = isQwen3Model(selectedModelId) ? 'flex' : 'none';
+        }
 
         // ── Source toggle ─────────────────────────────────────────────────────
         document.querySelectorAll('.source-btn').forEach(btn => {
@@ -139,7 +164,7 @@
         });
 
         // ── Custom model select ───────────────────────────────────────────────
-        let selectedModelId = 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC';
+        let selectedModelId = 'Llama-3.2-1B-Instruct-q4f16_1-MLC';
         let modelSelectDisabled = false;
 
         modelSelectBtn.addEventListener('click', () => {
@@ -159,6 +184,7 @@
                 modelDropdown.querySelectorAll('.custom-select-opt').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 modelSelectWrapper.classList.remove('open');
+                updateThinkingToggleVisibility();
                 if (llmEngine || llmEnginePromise) {
                     llmEngine = null; llmEnginePromise = null;
                     llmDot.className = 'dot dot-gray';
@@ -300,32 +326,60 @@
         async function runRAG(query) {
             const isManual = currentSource === 'manual';
 
-            aiQueryPreview.innerText = '...';
-            aiResultsDiv.innerHTML   = skeletons(2);
-            aiSection.style.display  = 'block';
-            answerCol.style.display  = 'block';
-            answerText.innerText     = '';
+            aiQueryPreview.innerText         = '';
+            aiResultsDiv.innerHTML           = skeletons(2);
+            aiSection.style.display          = 'block';
+            answerCol.style.display          = 'block';
+            answerText.innerText             = '';
+            thinkingDetails.style.display    = 'none';
+            thinkingDetails.open             = false;
+            thinkingText.innerText           = '';
+            thinkingExpandDetails.style.display = 'none';
+            thinkingExpandDetails.open       = false;
+            thinkingExpandText.innerText     = '';
             answerText.classList.add('generating');
 
             const systemExpand = isManual
-                ? 'Tu tarea es describir en una frase corta (máximo 12 palabras) el contenido que tendría una sección del Manual General de la Iglesia de Jesucristo de los SUD útil para responder la pregunta del usuario. Responde SOLO con la frase.'
-                : 'Tu tarea es describir en una frase corta (máximo 12 palabras) el contenido o enseñanza que tendría un versículo de las escrituras útil para responder la pregunta del usuario. La frase debe sonar como una descripción de texto escritural. Responde SOLO con la frase.';
+                ? 'Genera una consulta de búsqueda para encontrar secciones relevantes del Manual General de la Iglesia SUD. La consulta debe ser palabras clave o frases cortas (máximo 10 palabras) que describan el TEMA a buscar, no una respuesta. Responde SOLO con la consulta de búsqueda, sin explicaciones.'
+                : 'Genera una consulta de búsqueda para encontrar versículos de las escrituras relevantes. La consulta debe ser palabras clave o frases cortas (máximo 10 palabras) que describan el TEMA escritural a buscar, no una respuesta. Responde SOLO con la consulta de búsqueda, sin explicaciones.';
 
             let refinedQuery = query;
             try {
+                const thinking = isQwen3Model(selectedModelId) && thinkingToggle.checked;
                 const qStream = await llmEngine.chat.completions.create({
                     messages: [
                         { role: 'system', content: systemExpand },
-                        { role: 'user',   content: query },
+                        { role: 'user',   content: thinking ? query : `/no_thinking\n${query}` },
                     ],
-                    stream: true, max_tokens: 40, temperature: 0.2,
+                    stream: true, max_tokens: 200, temperature: 0.2,
                 });
-                let q = '';
-                for await (const chunk of qStream) q += chunk.choices[0]?.delta?.content || '';
+                let q = '', qThink = '', inThink = false, buf = '';
+                for await (const chunk of qStream) {
+                    buf += chunk.choices[0]?.delta?.content || '';
+                    while (buf.length > 0) {
+                        if (inThink) {
+                            const e = buf.indexOf('</think>');
+                            if (e !== -1) {
+                                qThink += buf.slice(0, e);
+                                thinkingExpandText.innerText = qThink;
+                                thinkingExpandDetails.style.display = 'block';
+                                inThink = false; buf = buf.slice(e + 8);
+                            } else {
+                                qThink += buf.slice(0, -8);
+                                thinkingExpandText.innerText = qThink;
+                                thinkingExpandDetails.style.display = 'block';
+                                buf = buf.slice(-8); break;
+                            }
+                        } else {
+                            const s = buf.indexOf('<think>');
+                            if (s !== -1) { q += buf.slice(0, s); inThink = true; buf = buf.slice(s + 7); }
+                            else { q += buf; buf = ''; }
+                        }
+                    }
+                    aiQueryPreview.innerText = q;
+                }
                 refinedQuery = q.trim().replace(/^["']|["']$/g, '');
             } catch (err) { console.error('Error en expansión:', err); }
-
-            aiQueryPreview.innerText = `"${refinedQuery}"`;
 
             const aiVec     = await embed(refinedQuery);
             const aiResults = knn(aiVec);
@@ -347,9 +401,10 @@
                 ? 'Eres un asistente experto en el Manual General de La Iglesia de Jesucristo de los Santos de los Últimos Días. Responde en español, de forma clara y concisa, citando las secciones del manual.'
                 : 'Eres un asistente experto en las escrituras de La Iglesia de Jesucristo de los Santos de los Últimos Días. Responde en español, de forma clara y concisa, citando las referencias de las escrituras.';
 
+            const thinkingOn = isQwen3Model(selectedModelId) && thinkingToggle.checked;
             const userPrompt = isManual
-                ? `Contexto del Manual General:\n\n${context}\n\nPregunta: ${query}\n\nResponde en español citando las secciones del manual.`
-                : `Contexto de las escrituras:\n\n${context}\n\nPregunta: ${query}\n\nResponde en español citando las referencias.`;
+                ? `${thinkingOn ? '' : '/no_thinking\n'}Contexto del Manual General:\n\n${context}\n\nPregunta: ${query}\n\nResponde en español citando las secciones del manual.`
+                : `${thinkingOn ? '' : '/no_thinking\n'}Contexto de las escrituras:\n\n${context}\n\nPregunta: ${query}\n\nResponde en español citando las referencias.`;
 
             try {
                 const aStream = await llmEngine.chat.completions.create({
@@ -357,12 +412,32 @@
                         { role: 'system', content: systemAnswer },
                         { role: 'user',   content: userPrompt },
                     ],
-                    stream: true, max_tokens: 400, temperature: 0.3,
+                    stream: true, max_tokens: 800, temperature: 0.3,
                 });
-                let answer = '';
+                let answer = '', thinking = '', inThink = false, thinkBuf = '';
                 answerText.innerText = '';
                 for await (const chunk of aStream) {
-                    answer += chunk.choices[0]?.delta?.content || '';
+                    thinkBuf += chunk.choices[0]?.delta?.content || '';
+                    while (thinkBuf.length > 0) {
+                        if (inThink) {
+                            const e = thinkBuf.indexOf('</think>');
+                            if (e !== -1) {
+                                thinking += thinkBuf.slice(0, e);
+                                thinkingText.innerText = thinking;
+                                thinkingDetails.style.display = 'block';
+                                inThink = false; thinkBuf = thinkBuf.slice(e + 8);
+                            } else {
+                                thinking += thinkBuf.slice(0, -8);
+                                thinkingText.innerText = thinking;
+                                thinkingDetails.style.display = 'block';
+                                thinkBuf = thinkBuf.slice(-8); break;
+                            }
+                        } else {
+                            const s = thinkBuf.indexOf('<think>');
+                            if (s !== -1) { answer += thinkBuf.slice(0, s); inThink = true; thinkBuf = thinkBuf.slice(s + 7); }
+                            else { answer += thinkBuf; thinkBuf = ''; }
+                        }
+                    }
                     answerText.innerText = answer;
                 }
             } catch (err) {
